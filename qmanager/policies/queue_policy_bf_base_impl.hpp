@@ -12,6 +12,7 @@
 #define QUEUE_POLICY_BF_BASE_IMPL_HPP
 
 #include "qmanager/policies/queue_policy_bf_base.hpp"
+#include "resource/policies/base/match_op.h"
 #include <jansson.h>
 #include <memory>
 
@@ -65,6 +66,18 @@ int queue_policy_bf_base_t<reapi_type>::next_match_iter ()
     }
     auto _jdecref = [] (json_t *p) { json_decref (p); };
     std::unique_ptr<json_t, decltype (_jdecref)> jobarray (jobarray_ptr, _jdecref);
+    if (job->hold) {
+        // Held job: reserve its footprint this cycle without ever allocating
+        // it, even when it could be allocated now. The reservation is torn
+        // down at the top of the next loop (cancel_reserved_jobs) and re-made,
+        // so it blocks the space for the current cycle only and backfill packs
+        // around it. On unhold the job is matched normally (below) and
+        // allocates from the front.
+        return reapi_type::match_allocate_multi (m_handle,
+                                                 match_op_t::MATCH_RESERVE,
+                                                 jobarray.get (),
+                                                 this);
+    }
     return reapi_type::match_allocate_multi (m_handle, m_try_reserve, jobarray.get (), this);
 }
 

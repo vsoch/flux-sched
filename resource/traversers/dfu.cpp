@@ -77,7 +77,8 @@ int dfu_traverser_t::request_feasible (detail::jobmeta_t const &meta,
 
     // check if there are enough nodes up at all
     if (target_nodes > get_graph_db ()->metadata.nodes_up) {
-        if (op == match_op_t::MATCH_ALLOCATE_ORELSE_RESERVE || op == match_op_t::MATCH_ALLOCATE) {
+        if (op == match_op_t::MATCH_ALLOCATE_ORELSE_RESERVE || op == match_op_t::MATCH_ALLOCATE
+            || op == match_op_t::MATCH_RESERVE) {
             errno = EBUSY;
             return -1;
         }
@@ -119,7 +120,8 @@ int dfu_traverser_t::request_feasible (detail::jobmeta_t const &meta,
     }
     if (feasible_nodes < target_nodes) {
         // no chance, don't even try
-        if (op == match_op_t::MATCH_ALLOCATE_ORELSE_RESERVE || op == match_op_t::MATCH_ALLOCATE) {
+        if (op == match_op_t::MATCH_ALLOCATE_ORELSE_RESERVE || op == match_op_t::MATCH_ALLOCATE
+            || op == match_op_t::MATCH_RESERVE) {
             errno = EBUSY;
             return -1;
         }
@@ -155,7 +157,26 @@ int dfu_traverser_t::schedule (Jobspec::Jobspec &jobspec,
         goto out;
 
     sched_iters++;
-    if ((rc = traverser->select (jobspec.resources, root, meta, x)) == 0) {
+    if (op == match_op_t::MATCH_RESERVE) {
+        // Reserve-only: never allocate at the current instant, but still make
+        // a real reservation even when the planner is empty. Try a direct
+        // select at the earliest future instant (now+1); this works on a free
+        // planner, whereas the forward-time reserve loop below cannot start
+        // there (planner_multi_avail_time_first finds no availability-change
+        // point after now+1 on an empty planner and returns -1, which would
+        // otherwise fall through to ENOENT->EBUSY). If now+1 is itself busy,
+        // leave rc != 0 so the loop below searches for the next free slot;
+        // the planner then has transition points and the loop works.
+        meta.alloc_type = jobmeta_t::alloc_type_t::AT_ALLOC_ORELSE_RESERVE;
+        int64_t reserve_base_at = meta.at;
+        meta.at = reserve_base_at + 1;
+        if ((rc = traverser->select (jobspec.resources, root, meta, x)) == 0) {
+            m_total_preorder = traverser->get_preorder_count ();
+            m_total_postorder = traverser->get_postorder_count ();
+            goto out;
+        }
+        meta.at = reserve_base_at;
+    } else if ((rc = traverser->select (jobspec.resources, root, meta, x)) == 0) {
         m_total_preorder = traverser->get_preorder_count ();
         m_total_postorder = traverser->get_postorder_count ();
         goto out;
@@ -185,8 +206,10 @@ int dfu_traverser_t::schedule (Jobspec::Jobspec &jobspec,
             ++sched_iters;
             break;
         }
+        case match_op_t::MATCH_RESERVE:
         case match_op_t::MATCH_ALLOCATE_ORELSE_RESERVE: {
-            /* Or else reserve */
+            /* Reserve (MATCH_RESERVE always reserves; the allocate-at-now
+               attempt above is skipped for it) or else reserve */
             meta.alloc_type = jobmeta_t::alloc_type_t::AT_ALLOC_ORELSE_RESERVE;
             t = meta.at + 1;
             p = (*get_graph ())[root].idata.subplans.at (dom);

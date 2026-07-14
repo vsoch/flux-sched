@@ -327,6 +327,21 @@ void qmanager_cb_t::jobmanager_alloc_cb (flux_t *h, const flux_msg_t *msg, void 
     job->userid = userid;
     job->t_submit = t_submit;
     job->priority = calc_priority (priority);
+    {
+        // Scheduler-specific hint: attributes.system.hold submits the job in
+        // a held state (parked out of scheduling until unheld via the
+        // sched-fluxion-qmanager.hold RPC). Accept either a JSON boolean
+        // (true) or a nonzero integer (1); absent/other means schedule
+        // normally.
+        json_t *hold_o = NULL;
+        (void)json_unpack (jobspec, "{s?{s?{s?o}}}", "attributes", "system", "hold", &hold_o);
+        if (hold_o) {
+            if (json_is_boolean (hold_o))
+                job->hold = json_is_true (hold_o);
+            else if (json_is_integer (hold_o))
+                job->hold = (json_integer_value (hold_o) != 0);
+        }
+    }
     try {
         jobspec_obj = Flux::Jobspec::Jobspec (jobspec_str);
     } catch (const Flux::Jobspec::parse_error &e) {
