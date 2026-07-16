@@ -54,8 +54,6 @@ test_expect_success "held job does not block the queue: a normal job runs" '
 '
 
 test_expect_success "unholding a job with a bad id fails (ENOENT)" '
-	test_must_fail qmanager_hold $(flux submit --dry-run -n1 hostname \
-		>/dev/null 2>&1; echo 123456789012345) false 2>/dev/null ||
 	test_must_fail flux python -c "
 import flux
 flux.Flux().rpc(\"sched-fluxion-qmanager.hold\",
