@@ -37,6 +37,8 @@ set(ALL_TESTS
   t1032-qmanager-hold.t
   t1033-qmanager-hold-reserve.t
   t1034-inject.t
+  t1035-inject-scout-coschedule.t
+  t1036-qmanager-coschedule.t
   t2317-resource-shrink.t
   t3000-jobspec.t
   t3001-resource-basic.t

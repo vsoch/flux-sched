@@ -7,7 +7,7 @@ reserved-first every scheduling loop (via the reserve-only match verb),
 blocking its footprint without ever allocating, until it is unheld. This is
 stronger than merely parking the job: a held job that reserves the whole node
 must prevent a lower-priority conflicting job from allocating that node. The
-quantum-ready signal is mocked as a direct sched-fluxion-qmanager.hold RPC.
+quantum-ready signal is mocked as a direct sched-fluxion-qmanager.release RPC.
 '
 
 . `dirname $0`/sharness.sh
@@ -19,13 +19,13 @@ excl_1N1B="${hwloc_basepath}/001N/exclusive/01-brokers"
 export FLUX_SCHED_MODULE=none
 test_under_flux 1
 
-qmanager_hold() {
+qmanager_release() {
 	flux python -c "
 import flux, sys
 h = flux.Flux()
-h.rpc('sched-fluxion-qmanager.hold',
-      {'id': int(sys.argv[1]), 'hold': sys.argv[2] == 'true'}).get()
-" "$(flux job id --to=dec $1)" "$2"
+h.rpc('sched-fluxion-qmanager.release',
+      {'id': int(sys.argv[1])}).get()
+" "$(flux job id --to=dec $1)"
 }
 
 test_expect_success 'load test resources' '
@@ -64,7 +64,7 @@ test_expect_success 'no resources are allocated while only the held job leads' '
 
 test_expect_success 'unholding the held job allocates it from the front' '
 	H=$(cat H.jobid) &&
-	qmanager_hold $H false &&
+	qmanager_release $H &&
 	flux job wait-event -t 30 $H alloc &&
 	test "$(flux jobs -no {state} $H)" != "SCHED"
 '

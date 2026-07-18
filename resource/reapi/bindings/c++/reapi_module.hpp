@@ -56,6 +56,11 @@ class reapi_module_t : public reapi_t {
                                      match_op_t match_op,
                                      json_t *jobs,
                                      queue_adapter_base_t *adapter);
+    /* Match a group of jobs that must be placed together, all or nothing.
+     * Each member names its own op, so a member that should run is allocated
+     * while a member that should be placed but not started is reserved.
+     */
+    static int match_coschedule (void *h, json_t *jobs, queue_adapter_base_t *adapter);
     static int update_allocate (void *h,
                                 const uint64_t jobid,
                                 const std::string &R,

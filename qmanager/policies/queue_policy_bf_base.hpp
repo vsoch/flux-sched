@@ -42,16 +42,21 @@ class queue_policy_bf_base_t : public queue_policy_base_t {
     unsigned int m_reservation_depth;
     unsigned int m_max_reservation_depth = MAX_RESERVATION_DEPTH;
 
+   protected:
+    /* Dispatch the job the cursor is on. Virtual so a policy can group jobs
+     * before matching them, rather than matching one at a time.
+     */
+    virtual int next_match_iter ();
+    decltype (m_pending)::iterator m_in_progress_iter = m_pending.end ();
+    void *m_handle = NULL;
+
    private:
-    int next_match_iter ();
     int cancel_reserved_jobs (void *h);
     int allocate_orelse_reserve_jobs (void *h);
     std::map<uint64_t, flux_jobid_t> m_reserved;
     int m_reservation_cnt;
     int m_scheduled_cnt;
     bool m_try_reserve = false;
-    decltype (m_pending)::iterator m_in_progress_iter = m_pending.end ();
-    void *m_handle = NULL;
 };
 
 }  // namespace detail
