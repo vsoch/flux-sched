@@ -18,6 +18,10 @@ MOD_NAME ("sched-fluxion-resource");
 
 static void match_request_cb (flux_t *h, flux_msg_handler_t *w, const flux_msg_t *msg, void *arg);
 
+static void match_coschedule_request_cb (flux_t *h,
+                                         flux_msg_handler_t *w,
+                                         const flux_msg_t *msg,
+                                         void *arg);
 static void match_multi_request_cb (flux_t *h,
                                     flux_msg_handler_t *w,
                                     const flux_msg_t *msg,
@@ -91,6 +95,10 @@ static void remove_subgraph_request_cb (flux_t *h,
 static const struct flux_msg_handler_spec htab[] =
     {{FLUX_MSGTYPE_REQUEST, "sched-fluxion-resource.match", match_request_cb, 0},
      {FLUX_MSGTYPE_REQUEST, "sched-fluxion-resource.match_multi", match_multi_request_cb, 0},
+     {FLUX_MSGTYPE_REQUEST,
+      "sched-fluxion-resource.match_coschedule",
+      match_coschedule_request_cb,
+      0},
      {FLUX_MSGTYPE_REQUEST, "sched-fluxion-resource.update", update_request_cb, 0},
      {FLUX_MSGTYPE_REQUEST, "sched-fluxion-resource.cancel", cancel_request_cb, 0},
      {FLUX_MSGTYPE_REQUEST, "sched-fluxion-resource.partial-cancel", partial_cancel_request_cb, 0},
@@ -423,6 +431,280 @@ static void match_request_cb (flux_t *h, flux_msg_handler_t *w, const flux_msg_t
 
 error:
     if (flux_respond_error (h, msg, errno, NULL) < 0)
+        flux_log_error (h, "%s: flux_respond_error", __FUNCTION__);
+}
+
+/* Match a group of jobs that have to be placed together.
+ *
+ * match_multi matches an array of jobs one after another and streams a reply
+ * for each, so a group can end up half placed. Coscheduling needs the group to
+ * succeed or fail as a whole: if one member cannot be placed, the members
+ * already placed are removed again and nothing is left behind.
+ *
+ * Each member names its own operation, because members of a group are not
+ * treated alike. A member that should run is allocated. A member that should be
+ * placed but not started, and released later by some external agent, is
+ * reserved. That is what makes this useful beyond gang scheduling: a request
+ * can hold space for a partner without racing it.
+ *
+ * Request:
+ *   { "jobs": [ { "jobid": I, "jobspec": o, "op": s }, ... ],
+ *     "require": s }
+ *
+ * op is any name match_op_from_string accepts, so allocate or reserve. It
+ * defaults to allocate.
+ *
+ * check, false by default, asks only whether the group could be placed. The
+ * group is matched in full to find out and then undone, so nothing is left
+ * placed and the caller gets a yes or no. That is what a submitter wants
+ * before creating either half of a pair: the jobs do not exist yet, so no
+ * jobid is needed and one is made up for the duration of the check.
+ *
+ * require defaults to all_now, meaning every member has to be placeable right
+ * now for the group to be placed at all. That matters because a reservation is
+ * for a future time and so always succeeds: without this, a member asking to
+ * be reserved would be satisfied on a full machine while its partner allocated
+ * the last free cores, which is the half started group this endpoint exists to
+ * prevent. So the group is first allocated in full to prove it fits, and only
+ * then is each member given the operation it asked for.
+ *
+ * require of any_time skips that proof and applies each op directly.
+ *
+ * Reply on success, one entry per member in request order:
+ *   { "jobs": [ { "jobid": I, "status": s, "at": I, "overhead": f, "R": s } ] }
+ *
+ * On failure the whole group is rolled back and an error is returned, so the
+ * caller never sees a partial placement.
+ */
+static void match_coschedule_request_cb (flux_t *h,
+                                         flux_msg_handler_t *w,
+                                         const flux_msg_t *msg,
+                                         void *arg)
+{
+    size_t index;
+    json_t *value;
+    json_t *jobs = nullptr;
+    json_t *results = nullptr;
+    uint64_t jobid = 0;
+    std::string errmsg;
+    /* what has been placed so far, so it can be undone */
+    std::vector<std::pair<uint64_t, std::string>> placed;
+    const char *require = "all_now";
+    bool require_all_now = true;
+    int check = 0;
+    std::shared_ptr<resource_ctx_t> ctx = getctx ((flux_t *)arg);
+
+    if (flux_request_unpack (msg,
+                             NULL,
+                             "{s:o s?s s?b}",
+                             "jobs",
+                             &jobs,
+                             "require",
+                             &require,
+                             "check",
+                             &check)
+        < 0)
+        goto error;
+    require_all_now = (strcmp (require, "all_now") == 0);
+    if (!require_all_now && strcmp (require, "any_time") != 0) {
+        errno = EINVAL;
+        errmsg = "coschedule require must be all_now or any_time";
+        goto error;
+    }
+    if (!json_is_array (jobs) || json_array_size (jobs) == 0) {
+        errno = EINVAL;
+        errmsg = "coschedule needs a non empty array of jobs";
+        goto error;
+    }
+    if (!(results = json_array ())) {
+        errno = ENOMEM;
+        goto error;
+    }
+
+    /* Prove the whole group fits right now, before honouring the individual
+     * operations. A reservation is for a future time and always succeeds, so
+     * without this proof a held member would be satisfied on a full machine.
+     */
+    if (require_all_now) {
+        json_array_foreach (jobs, index, value) {
+            json_t *jobspec_obj = nullptr;
+            char *jobspec_str = nullptr;
+            int64_t at = 0;
+            int64_t now = 0;
+            double overhead = 0.0f;
+            std::stringstream R;
+
+            /* A check has no jobs yet, so stand in with a small distinctive
+             * id. Real ids are FLUID and far larger, and the check erases
+             * whatever it tracked before returning.
+             */
+            jobid = 0xc05c0 + (uint64_t)index;
+            if (json_unpack (value, "{s?I s:o}", "jobid", &jobid, "jobspec", &jobspec_obj) < 0) {
+                errno = EPROTO;
+                errmsg = "a coschedule member needs a jobspec";
+                goto rollback;
+            }
+            if (!(jobspec_str = json_dumps (jobspec_obj, JSON_COMPACT))) {
+                errno = ENOMEM;
+                goto rollback;
+            }
+            /* A check asks whether the group could ever be placed, not
+             * whether it could be placed this instant. A pair whose device is
+             * busy right now is a pair that queues, not one to refuse, so
+             * asking to allocate would reject every request after the first.
+             */
+            if (run_match (ctx,
+                           jobid,
+                           check ? "satisfiability" : "allocate",
+                           jobspec_str,
+                           &now,
+                           &at,
+                           &overhead,
+                           R,
+                           NULL)
+                < 0) {
+                int saved = errno;
+                free (jobspec_str);
+                if (saved == EBUSY)
+                    ctx->jobs.erase (jobid);
+                errno = saved;
+                errmsg = "the group does not fit right now, so none of it was placed";
+                goto rollback;
+            }
+            free (jobspec_str);
+            /* satisfiability places nothing, so there is nothing to undo for
+             * it. Only a real allocation is recorded for rollback.
+             */
+            if (!check)
+                placed.push_back (std::make_pair (jobid, R.str ()));
+            else
+                ctx->jobs.erase (jobid);
+        }
+        /* In check mode the proof is the whole answer. Undo it and say yes,
+         * leaving nothing placed and no job known to the scheduler.
+         */
+        if (check) {
+            if (flux_respond_pack (h, msg, "{s:b s:O}", "fits", 1, "jobs", results) < 0)
+                flux_log_error (h, "%s: flux_respond_pack", __FUNCTION__);
+            json_decref (results);
+            return;
+        }
+
+        /* it fits. Undo the proof so each member can be given its own op. */
+        for (auto it = placed.rbegin (); it != placed.rend (); ++it) {
+            bool full_removal = false;
+            if (run_remove (ctx, it->first, it->second.c_str (), false, full_removal) < 0) {
+                errmsg = "could not undo the fit check";
+                goto rollback;
+            }
+            if (full_removal)
+                ctx->jobs.erase (it->first);
+        }
+        placed.clear ();
+    }
+
+    json_array_foreach (jobs, index, value) {
+        json_t *jobspec_obj = nullptr;
+        char *jobspec_str = nullptr;
+        const char *op = "allocate";
+        int64_t at = 0;
+        int64_t now = 0;
+        double overhead = 0.0f;
+        std::stringstream R;
+        json_t *entry = nullptr;
+
+        if (json_unpack (value,
+                         "{s:I s:o s?s}",
+                         "jobid",
+                         &jobid,
+                         "jobspec",
+                         &jobspec_obj,
+                         "op",
+                         &op)
+            < 0) {
+            errno = EPROTO;
+            errmsg = "a coschedule member needs a jobid and a jobspec";
+            goto rollback;
+        }
+        if (match_op_from_string (op) == MATCH_UNKNOWN) {
+            errno = EINVAL;
+            errmsg = std::string ("unknown coschedule op: ") + op;
+            goto rollback;
+        }
+        if (is_existent_jobid (ctx, jobid)) {
+            errno = EINVAL;
+            errmsg = "a coschedule member is already known to the scheduler";
+            goto rollback;
+        }
+        if (!(jobspec_str = json_dumps (jobspec_obj, JSON_COMPACT))) {
+            errno = ENOMEM;
+            goto rollback;
+        }
+        if (run_match (ctx, jobid, op, jobspec_str, &now, &at, &overhead, R, NULL) < 0) {
+            int saved = errno;
+            free (jobspec_str);
+            if (saved == EBUSY)
+                ctx->jobs.erase (jobid);
+            errno = saved;
+            errmsg = "a coschedule member could not be placed, so the group was rolled back";
+            goto rollback;
+        }
+        free (jobspec_str);
+
+        placed.push_back (std::make_pair (jobid, R.str ()));
+        if (!(entry = json_pack ("{s:I s:s s:I s:f s:s}",
+                                 "jobid",
+                                 jobid,
+                                 "status",
+                                 /* A reservation is a reservation even when the
+                                  * resources happen to be free right now.
+                                  * get_status_string only compares at against
+                                  * now, so it would call this ALLOCATED and the
+                                  * caller would start a job that was meant to
+                                  * be held.
+                                  */
+                                 match_op_from_string (op) == MATCH_RESERVE
+                                     ? "RESERVED"
+                                     : get_status_string (now, at),
+                                 "at",
+                                 at,
+                                 "overhead",
+                                 overhead,
+                                 "R",
+                                 R.str ().c_str ()))) {
+            errno = ENOMEM;
+            goto rollback;
+        }
+        if (json_array_append_new (results, entry) < 0) {
+            json_decref (entry);
+            errno = ENOMEM;
+            goto rollback;
+        }
+    }
+
+    if (flux_respond_pack (h, msg, "{s:O}", "jobs", results) < 0)
+        flux_log_error (h, "%s: flux_respond_pack", __FUNCTION__);
+    json_decref (results);
+    return;
+
+rollback: {
+    int saved = errno;
+    /* undo in reverse, so the graph is returned to where it started */
+    for (auto it = placed.rbegin (); it != placed.rend (); ++it) {
+        bool full_removal = false;
+        if (run_remove (ctx, it->first, it->second.c_str (), false, full_removal) < 0)
+            flux_log_error (ctx->h,
+                            "%s: could not roll back member %jd",
+                            __FUNCTION__,
+                            static_cast<intmax_t> (it->first));
+        else if (full_removal)
+            ctx->jobs.erase (it->first);
+    }
+    errno = saved;
+}
+    json_decref (results);
+error:
+    if (flux_respond_error (h, msg, errno, errmsg.empty () ? NULL : errmsg.c_str ()) < 0)
         flux_log_error (h, "%s: flux_respond_error", __FUNCTION__);
 }
 

@@ -570,6 +570,41 @@ static const struct flux_msg_handler_spec htab[] = {
     {FLUX_MSGTYPE_REQUEST, "*.params", params_request_cb, FLUX_ROLE_USER},
     FLUX_MSGHANDLER_TABLE_END,
 };
+// Hold/unhold a pending job. Payload: {"id":I, "hold":b}. A held job is
+// parked out of the scheduling loop until unheld. Only the job's owner (or
+// the instance owner) may (un)hold it. This is the RPC the "scout" fires
+// when its external resource (e.g. a quantum session) becomes ready; for
+// development it can be driven directly (see t1032).
+static void release_request_cb (flux_t *h, flux_msg_handler_t *w, const flux_msg_t *msg, void *arg)
+{
+    qmanager_cb_ctx_t *ctx = static_cast<qmanager_cb_ctx_t *> (arg);
+    std::shared_ptr<queue_policy_base_t> queue;
+    std::shared_ptr<job_t> job;
+    std::string queue_name;
+    flux_jobid_t id;
+
+    if (flux_msg_unpack (msg, "{s:I}", "id", &id) < 0)
+        goto error;
+    if (ctx->find_queue (id, queue_name, queue) < 0) {
+        errno = ENOENT;
+        goto error;
+    }
+    if (!(job = queue->lookup (id)))
+        goto error;  // errno set by lookup()
+    // authorize: instance owner always; otherwise requester must own the job
+    if (flux_msg_authorize (msg, job->userid) < 0)
+        goto error;
+    // release: clear the hold so the job allocates its reserved footprint
+    if (queue->set_hold (id, false) < 0)
+        goto error;
+    if (flux_respond (h, msg, NULL) < 0)
+        flux_log_error (h, "%s: flux_respond", __FUNCTION__);
+    return;
+error:
+    if (flux_respond_error (h, msg, errno, NULL) < 0)
+        flux_log_error (h, "%s: flux_respond_error", __FUNCTION__);
+}
+
 static const struct flux_msg_handler_spec statstab[] = {
     {FLUX_MSGTYPE_REQUEST,
      "sched-fluxion-qmanager.stats-get",
@@ -579,6 +614,7 @@ static const struct flux_msg_handler_spec statstab[] = {
      "sched-fluxion-qmanager.stats-clear",
      qmanager_safe_cb_t::jobmanager_stats_clear_cb,
      FLUX_ROLE_USER},
+    {FLUX_MSGTYPE_REQUEST, "sched-fluxion-qmanager.release", release_request_cb, FLUX_ROLE_USER},
     FLUX_MSGHANDLER_TABLE_END,
 };
 

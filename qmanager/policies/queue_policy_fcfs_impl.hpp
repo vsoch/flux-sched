@@ -34,6 +34,12 @@ int queue_policy_fcfs_t<reapi_type>::pack_jobs (json_t *jobs)
         json_t *jobspec_obj;
         json_error_t err;
         job = m_jobs[iter->second];
+        if (job->hold) {
+            // Held jobs are never allocated in FCFS (which does not reserve);
+            // skip packing them so they remain pending until unheld.
+            iter++;
+            continue;
+        }
         if (!(jobspec_obj = json_loads (job->jobspec.c_str (), 0, &err))) {
             json_decref (jobs);
             errno = ENOMEM;
@@ -101,6 +107,14 @@ int queue_policy_fcfs_t<reapi_type>::handle_match_success (flux_jobid_t jobid,
         errno = EINVAL;
         return -1;
     }
+    // Skip held jobs that were not packed for matching so m_iter stays aligned
+    // with the packed (non-held) job order that produced this result.
+    while (m_iter != m_pending.end () && m_jobs[m_iter->second]->hold)
+        ++m_iter;
+    if (m_iter == m_pending.end ()) {
+        errno = EINVAL;
+        return -1;
+    }
     std::shared_ptr<job_t> job = m_jobs[m_iter->second];
     if (job->id != static_cast<flux_jobid_t> (jobid)) {
         errno = EINVAL;
@@ -122,7 +136,11 @@ int queue_policy_fcfs_t<reapi_type>::handle_match_failure (flux_jobid_t jobid, i
         return -1;
     }
     if (errcode != EBUSY && errcode != ENODATA) {
-        m_iter = to_rejected (m_iter, (errcode == ENODEV) ? "unsatisfiable" : "match error");
+        // align m_iter with the packed (non-held) order before rejecting
+        while (m_iter != m_pending.end () && m_jobs[m_iter->second]->hold)
+            ++m_iter;
+        if (m_iter != m_pending.end ())
+            m_iter = to_rejected (m_iter, (errcode == ENODEV) ? "unsatisfiable" : "match error");
     }
     // Either:
     // ENODEV: the job is unsatisfiable, or

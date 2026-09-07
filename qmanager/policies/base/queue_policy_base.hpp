@@ -117,6 +117,10 @@ class job_t {
     std::string note = "";
     t_stamps_t t_stamps;
     schedule_t schedule;
+    // When true, the job is "held": it stays in the pending set but is
+    // reserved-first every scheduling loop and never allocated (see the
+    // backfill policy) until unheld via queue_policy_base_t::set_hold().
+    bool hold = false;
 };
 
 /*! Queue policy base interface abstract class. Derived classes must
@@ -559,6 +563,40 @@ class queue_policy_base_t : public resource_model::queue_adapter_base_t {
         rc = 0;
     out:
         return rc;
+    }
+
+    /*! Set or clear the hold flag on a pending job. A held job remains in the
+     *  pending set but is reserved-first every scheduling loop and never
+     *  allocated (see the backfill policy), so it stays in SCHED without
+     *  consuming an allocation. Clearing the flag re-arms scheduling so the
+     *  next loop allocates it from the front.
+     *
+     *  \param id    jobid to (un)hold; must currently be PENDING.
+     *  \param hold  true to hold, false to unhold.
+     *  \return      0 on success (including a no-op if already in the
+     *               requested state); -1 with errno set on error:
+     *                   ENOENT: no such job
+     *                   EINVAL: job is not in a pending state
+     */
+    int set_hold (flux_jobid_t id, bool hold)
+    {
+        auto job_it = m_jobs.find (id);
+        if (job_it == m_jobs.end ()) {
+            errno = ENOENT;
+            return -1;
+        }
+        auto &job = job_it->second;
+        if (job->state != job_state_kind_t::PENDING) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (hold == job->hold)
+            return 0;
+        job->hold = hold;
+        // Re-arm scheduling so the next loop re-evaluates this job: reserved
+        // while held, allocated once unheld. The job never leaves m_pending.
+        set_schedulability (true);
+        return 0;
     }
 
     /*! Remove a job whose jobid is id from the pending or maybe_pending queues.
