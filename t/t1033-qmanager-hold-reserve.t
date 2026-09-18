@@ -1,13 +1,14 @@
 #!/bin/sh
 
-test_description='Test that a held job is reserved-first under backfill
+test_description='Test that a held job is reserved-first under coschedule
 
-Under a backfill policy, a held job stays in the pending set and is
+Under the coschedule policy, a held job stays in the pending set and is
 reserved-first every scheduling loop (via the reserve-only match verb),
 blocking its footprint without ever allocating, until it is unheld. This is
 stronger than merely parking the job: a held job that reserves the whole node
 must prevent a lower-priority conflicting job from allocating that node. The
 quantum-ready signal is mocked as a direct sched-fluxion-qmanager.release RPC.
+The hold is only honoured by coschedule; see t1036 for the other policies.
 '
 
 . `dirname $0`/sharness.sh
@@ -32,9 +33,9 @@ test_expect_success 'load test resources' '
 	load_test_resources ${excl_1N1B}
 '
 
-test_expect_success 'load fluxion with the EASY backfill policy' '
+test_expect_success 'load fluxion with the coschedule policy' '
 	load_resource prune-filters=ALL:core subsystems=containment policy=low &&
-	load_qmanager queue-policy=easy
+	load_qmanager queue-policy=coschedule
 '
 
 # H: held, higher urgency, exclusive whole node.
