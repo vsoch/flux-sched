@@ -12,6 +12,7 @@
 #define QUEUE_POLICY_BF_BASE_IMPL_HPP
 
 #include "qmanager/policies/queue_policy_bf_base.hpp"
+#include "resource/policies/base/match_op.h"
 #include <jansson.h>
 #include <memory>
 

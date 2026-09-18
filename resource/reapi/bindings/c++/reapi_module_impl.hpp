@@ -140,6 +140,80 @@ void match_allocate_multi_cont (flux_future_t *f, void *arg)
     return;
 }
 
+/* One reply for the whole group rather than a stream, because the group is
+ * placed or not placed as a unit. The adapter is still told about each member
+ * in turn, since it tracks jobs individually.
+ */
+void match_coschedule_cont (flux_future_t *f, void *arg)
+{
+    size_t index;
+    json_t *value;
+    json_t *jobs = nullptr;
+    queue_adapter_base_t *adapter = static_cast<queue_adapter_base_t *> (arg);
+
+    if (flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
+        /* the group failed and the resource module already rolled it back, so
+         * there is nothing placed to undo here */
+        adapter->handle_match_failure (-1, errno);
+        flux_future_destroy (f);
+        return;
+    }
+    json_array_foreach (jobs, index, value) {
+        int64_t jobid = -1;
+        int64_t at = 0;
+        double ov = 0.0;
+        const char *rset = nullptr;
+        const char *status = nullptr;
+
+        if (json_unpack (value,
+                         "{s:I s:s s:f s:s s:I}",
+                         "jobid",
+                         &jobid,
+                         "status",
+                         &status,
+                         "overhead",
+                         &ov,
+                         "R",
+                         &rset,
+                         "at",
+                         &at)
+            < 0) {
+            adapter->handle_match_failure (jobid, EPROTO);
+            break;
+        }
+        if (adapter->handle_match_success (jobid, status, rset, at, ov) < 0) {
+            adapter->set_sched_loop_active (false);
+            break;
+        }
+    }
+    flux_future_destroy (f);
+    return;
+}
+
+int reapi_module_t::match_coschedule (void *h, json_t *jobs, queue_adapter_base_t *adapter)
+{
+    flux_t *fh = static_cast<flux_t *> (h);
+    flux_future_t *f = nullptr;
+
+    if (!fh || !jobs) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!(f = flux_rpc_pack (fh,
+                             "sched-fluxion-resource.match_coschedule",
+                             FLUX_NODEID_ANY,
+                             0,
+                             "{s:O}",
+                             "jobs",
+                             jobs)))
+        return -1;
+    if (flux_future_then (f, -1.0f, match_coschedule_cont, static_cast<void *> (adapter)) < 0) {
+        flux_future_destroy (f);
+        return -1;
+    }
+    return 0;
+}
+
 int reapi_module_t::match_allocate_multi (void *h,
                                           match_op_t match_op,
                                           json_t *jobs,

@@ -6,6 +6,7 @@ LABEL maintainer="Vanessasaurus <@vsoch>"
 ARG USERNAME=vscode
 ARG USER_UID=1000
 ARG USER_GID=1000
+ARG CLAUDE_CODE_VERSION=latest
 ENV USERNAME=${USERNAME}
 ENV USER_UID=${USER_UID}
 ENV USER_GID=${USER_GID}
@@ -22,7 +23,14 @@ RUN sudo apt-get -qq install -y --no-install-recommends \
         libyaml-cpp-dev \
         libedit-dev \
         ninja-build \
-        curl
+        curl \
+        nodejs \
+        npm \
+        iptables \
+        ipset \
+        iproute2 \
+        dnsutils \
+        aggregate
 
 # Assuming installing to /usr/local
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/lib
@@ -30,12 +38,6 @@ ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/lib
 RUN curl -s -L https://github.com/Kitware/CMake/releases/download/v3.26.4/cmake-3.26.4-linux-$(uname -m).sh > cmake.sh ;\
     sudo bash cmake.sh --prefix=/usr/local --skip-license ;\
     rm cmake.sh
-
-# Install Go 19 for TBA bindings (if Go bindings desired)
-RUN wget https://go.dev/dl/go1.19.10.linux-amd64.tar.gz  && tar -xvf go1.19.10.linux-amd64.tar.gz && \
-         mv go /usr/local && rm go1.19.10.linux-amd64.tar.gz
-      
-ENV PATH=$PATH:/usr/local/go/bin:/home/vscode/go/bin
 
 # extra interactive utilities
 RUN apt-get update \
@@ -45,8 +47,19 @@ RUN apt-get update \
     bats \
     ripgrep
 
+    # Install Claude
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
 # Add the group and user that match our ids
 RUN groupadd -g ${USER_GID} ${USERNAME} && \
     adduser --disabled-password --uid ${USER_UID} --gid ${USER_GID} --gecos "" ${USERNAME} && \
     echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers
+USER $USERNAME
+
+# Copy and set up firewall script
+COPY .devcontainer/init-firewall.sh /usr/local/bin/
+USER root
+RUN chmod +x /usr/local/bin/init-firewall.sh && \
+  echo "${USERNAME} ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/${USERNAME}-firewall && \
+  chmod 0440 /etc/sudoers.d/${USERNAME}-firewall
 USER $USERNAME
