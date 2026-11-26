@@ -21,8 +21,14 @@ static void feasibility_request_cb (flux_t *h,
                                     const flux_msg_t *msg,
                                     void *arg);
 
+static void add_subgraph_request_cb (flux_t *h,
+                                     flux_msg_handler_t *w,
+                                     const flux_msg_t *msg,
+                                     void *arg);
+
 static const struct flux_msg_handler_spec htab[] =
     {{FLUX_MSGTYPE_REQUEST, "feasibility.check", feasibility_request_cb, 0},
+     {FLUX_MSGTYPE_REQUEST, "feasibility.add_subgraph", add_subgraph_request_cb, 0},
      FLUX_MSGHANDLER_TABLE_END};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -237,6 +243,40 @@ error_memfree:
     saved_errno = errno;
     free ((void *)js_str);
     errno = saved_errno;
+error:
+    if (flux_respond_error (h, msg, errno, errmsg.c_str ()) < 0)
+        flux_log_error (h, "%s: flux_respond_error", __FUNCTION__);
+}
+
+/* This module bootstraps its graph from sched-fluxion-resource.notify, which
+ * only carries what core acquired. A subgraph grown into the scheduler's
+ * graph never reaches that stream, so without this handler every check
+ * against the added resources answers ENODEV while the scheduler itself
+ * would place the job. Whoever grows the scheduler's graph must grow this
+ * one with the same subgraph.
+ */
+static void add_subgraph_request_cb (flux_t *h,
+                                     flux_msg_handler_t *w,
+                                     const flux_msg_t *msg,
+                                     void *arg)
+{
+    std::shared_ptr<resource_ctx_t> ctx = getctx ((flux_t *)arg);
+    std::string errmsg = "";
+    char *R_subgraph = NULL;
+
+    if (flux_request_unpack (msg, NULL, "{s:s}", "subgraph", &R_subgraph) < 0)
+        goto error;
+
+    if (run_add_subgraph (ctx, R_subgraph) != 0) {
+        errmsg = "failed to add subgraph.";
+        goto error;
+    }
+
+    if (flux_respond_pack (h, msg, "{}") < 0)
+        flux_log_error (h, "%s", __FUNCTION__);
+
+    return;
+
 error:
     if (flux_respond_error (h, msg, errno, errmsg.c_str ()) < 0)
         flux_log_error (h, "%s: flux_respond_error", __FUNCTION__);
