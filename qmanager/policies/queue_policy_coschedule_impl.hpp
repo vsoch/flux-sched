@@ -43,6 +43,15 @@ queue_policy_coschedule_t<reapi_type>::queue_policy_coschedule_t ()
  * at the top of the next loop with the other reservations and made again,
  * so it blocks the space for one loop at a time. When the hold is cleared
  * the job is matched as any other and allocates from the front.
+ *
+ * Preemption for a cleared hold does not live here yet. When the hold is
+ * cleared and the job still cannot be matched, the policy knows the exact
+ * shortfall and which running jobs sit on the reserved resources, which a
+ * jobtap plugin only approximates from its own core table. For now the
+ * flux-quantum jobtap plugin makes that decision from the job manager side,
+ * after a short settle, and cancels unprotected jobs for the shortfall. The
+ * long term home for it is this policy, where the reservation itself can
+ * name the jobs to preempt.
  */
 template<class reapi_type>
 int queue_policy_coschedule_t<reapi_type>::next_match_iter ()
