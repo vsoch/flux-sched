@@ -830,6 +830,12 @@ static int grow_resource_db_rv1exec (std::shared_ptr<resource_ctx_t> &ctx,
             goto done;
         }
         flux_log (ctx->h, LOG_DEBUG, "resource graph datastore loaded with rv1exec reader");
+    } else {
+        // The root is already in the graph: nothing to grow, and that is
+        // success. Leaving rc at -1 here failed every later resource.acquire
+        // update that carries resources, and update_resource_db stops on
+        // that failure before marking ranks up.
+        rc = 0;
     }
 done:
     saved_errno = errno;
